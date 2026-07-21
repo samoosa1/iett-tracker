@@ -913,9 +913,17 @@ MAP_PAGE = """<!DOCTYPE html>
   @keyframes breathe{0%,100%{box-shadow:0 0 0 0 rgba(25,195,125,.55)}70%{box-shadow:0 0 0 8px rgba(25,195,125,0)}}
   @keyframes blink{0%,100%{opacity:1}50%{opacity:.35}}
   @keyframes bounce{0%,80%,100%{transform:translateY(0);opacity:.45}40%{transform:translateY(-4px);opacity:1}}
-  .iL{width:8px;height:8px;border-radius:50%;background:var(--green);display:inline-block;animation:breathe 2s infinite}
-  .iD{width:8px;height:8px;border-radius:50%;background:var(--red);display:inline-block;animation:blink 1.5s infinite}
-  .iW i{width:5px;height:5px;border-radius:50%;background:var(--muted);display:inline-block;margin-right:3px;animation:bounce 1.1s infinite}
+  .iL{width:8px;height:8px;border-radius:50%;background:var(--green);display:inline-block;animation:breathe 2s infinite;flex:0 0 auto}
+  .iD{width:8px;height:8px;border-radius:50%;background:var(--red);display:inline-block;animation:blink 1.5s infinite;flex:0 0 auto}
+  /* #dot swaps between one circle and the 3-dot "working" group. setInd() clears
+     its class, so in the flex .foot row it would size to content and SHRINK when
+     the status text is long — squeezing the group until the inline-block dots
+     wrapped and the first stacked above the others. flex:none pins it; nowrap is
+     belt-and-braces. */
+  #dot{flex:0 0 auto;display:inline-flex;align-items:center}
+  .iW{display:inline-flex;align-items:center;white-space:nowrap}
+  .iW i{width:5px;height:5px;border-radius:50%;background:var(--muted);display:inline-block;margin-right:3px;animation:bounce 1.1s infinite;flex:0 0 auto}
+  .iW i:last-child{margin-right:0}
   .iW i:nth-child(2){animation-delay:.15s} .iW i:nth-child(3){animation-delay:.3s}
   .busglide{transition:transform .9s linear}
   #offline{display:none;position:absolute;top:0;left:0;right:0;z-index:1200;
@@ -935,11 +943,14 @@ MAP_PAGE = """<!DOCTYPE html>
   .leaflet-tooltip-top:before{border-top-color:#11141a}
   .leaflet-container a{color:var(--green)}
   .leaflet-bar a{background:#11141a;color:var(--fg);border-color:var(--line)}
+  /* overflow-y:auto + margin:auto on the card, NOT align-items:center alone: a
+     centred flex item taller than its container gets clipped at BOTH ends with no
+     way to scroll to it (bites on landscape phones). */
   #login{display:none;position:fixed;inset:0;z-index:3000;background:var(--bg);
-    align-items:center;justify-content:center;padding:24px}
+    align-items:center;justify-content:center;padding:24px;overflow-y:auto}
   #login.show{display:flex}
   .lcard{background:var(--card);border:1px solid var(--line);border-radius:20px;
-    padding:28px 22px;width:100%;max-width:320px;text-align:center;
+    padding:28px 22px;width:100%;max-width:320px;text-align:center;margin:auto;
     box-shadow:0 12px 40px rgba(0,0,0,.6)}
   .lbus{width:52px;height:52px;border-radius:14px}
   .ltitle{font-size:21px;font-weight:800;margin-top:8px}

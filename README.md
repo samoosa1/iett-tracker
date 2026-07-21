@@ -305,3 +305,7 @@ remote-update endpoint is disabled with no default token.
 
 The learned database, logs and backups are gitignored. They are regenerable, and the database
 records arrival times at whichever stops you track.
+
+## Licence
+
+MIT. See [LICENSE](LICENSE).
