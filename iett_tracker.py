@@ -219,6 +219,29 @@ TRAFFIC_CSV_URL = ("https://data.ibb.gov.tr/dataset/3ee6d744-5da2-40c8-9cd6-"
 _GEOHASH_B32 = "0123456789bcdefghjkmnpqrstuvwxyz"
 
 import os as _osmod, hashlib as _hashlib, secrets as _secrets
+
+
+def _load_dotenv() -> None:
+    """Read KEY=VALUE lines from a `.env` beside this script into the environment,
+    so the 24/7 service paths (a Windows SYSTEM task, a systemd unit) can carry
+    settings without fighting the process environment. A real environment variable
+    always wins over the file. Deliberately tiny: no third-party dependency."""
+    path = _osmod.path.join(_osmod.path.dirname(_osmod.path.abspath(__file__)), ".env")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                key, val = key.strip(), val.strip().strip('"').strip("'")
+                if key and key not in _osmod.environ:
+                    _osmod.environ[key] = val
+    except OSError:
+        pass
+
+
+_load_dotenv()
 # Remote self-update — token comes from the environment only, with NO baked-in default,
 # so a public checkout can never carry a working one. The endpoint is off regardless.
 UPDATE_TOKEN = _osmod.environ.get("IETT_UPDATE_TOKEN", "")

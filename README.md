@@ -44,9 +44,23 @@ Your browser opens on a live map of the 522. That is the whole install.
 The first run knows nothing, so early ETAs come from the timetable and are marked as such.
 Leave it running: it starts learning immediately and the predictions sharpen over a few days.
 
-**A password is generated on first start** and saved to `.auth_secret` next to the script, so
-the page is not open to anyone who can reach the port. It is printed to the console on that
-first run. Set `IETT_PASS` yourself if you would rather choose it (see `.env.example`).
+**A password is generated on first start**, printed to the console, and saved to
+`.auth_secret` next to the script, so the page is not open to anyone who can reach the port
+and the password survives restarts.
+
+**To choose your own**, any of these work (first one found wins):
+
+```bash
+# 1. a .env file next to the script — easiest for an always-on service
+cp .env.example .env && echo 'IETT_PASS=your-password-here' >> .env
+
+# 2. a real environment variable — overrides the file
+IETT_PASS=your-password-here python3 iett_tracker.py --map 522
+
+# 3. or just edit .auth_secret and restart
+```
+
+Restart the app after changing it.
 
 ---
 
@@ -225,7 +239,7 @@ Behaviour is tuned by constants near the top of `iett_tracker.py`:
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `IETT_USER` / `IETT_PASS` | `bus` / generated | Web login, from the environment. An unset password means one is generated into `.auth_secret` and reused across restarts |
+| `IETT_USER` / `IETT_PASS` | `bus` / generated | Web login. Resolved in order: real environment variable, then `.env` beside the script, then `.auth_secret`, else generated and saved there |
 | `--port` | `8731` | Listening port |
 | `RUSH_INTERVAL` / `OFFPEAK_INTERVAL` | `40` / `40` | Seconds between polls. **Leave these alone**, see the rate limit above |
 | `LIVE_TTL` | `40` | One shared upstream call per this many seconds. The real governor |
