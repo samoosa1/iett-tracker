@@ -3350,7 +3350,8 @@ def migrate_data():
     if old.exists() and not SEG_DB.exists():
         try:
             shutil.copy(old, SEG_DB)
-            console.print(f"[dim]migrated learned DB → {SEG_DB}[/dim]")
+            console.print(f"[dim]found an older learned database at {old}, "
+                          f"copied it next to the app → {SEG_DB}[/dim]")
         except OSError:
             pass
 
