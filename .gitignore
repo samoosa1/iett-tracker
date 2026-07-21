@@ -32,3 +32,6 @@ __pycache__/
 Thumbs.db
 .idea/
 .vscode/
+
+# Your personal route config (copy from config.example.json)
+config.json

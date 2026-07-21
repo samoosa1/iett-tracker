@@ -1,0 +1,57 @@
+{
+  "_comment": [
+    "Copy this to `config.json` and edit it. Every key is optional: anything you",
+    "leave out keeps its built-in default, so you can start with just `line` and",
+    "`focus`. Find your stop codes with:",
+    "    python iett_tracker.py --stops 500T        (list a line's stops)",
+    "    python iett_tracker.py --search kadikoy    (search stops by name)",
+    "Keys beginning with _ are ignored, so comments like this are safe."
+  ],
+
+  "_line": "The line you track. Used as the default for --map and friends.",
+  "line": "500T",
+
+  "_focus": [
+    "The boarding points you actually use. Each becomes a button on the hero card,",
+    "showing the next buses to that stop. One entry is fine; two gives you the",
+    "there-and-back toggle. `label` is the button text, `at` is the small caption.",
+    "These stops are also the ones prediction accuracy is scored against."
+  ],
+  "focus": [
+    {"line": "500T", "stop": "111111", "label": "→ Work", "at": "board at Kadıköy"},
+    {"line": "500T", "stop": "222222", "label": "→ Home", "at": "board at Tuzla"}
+  ],
+
+  "_eta": "Which stop the live ETA panel watches, and on which lines.",
+  "eta": {"stop": "111111", "lines": ["500T"], "label": "KADIKÖY"},
+
+  "_home_stops": "Stops drawn with the 'boarding' marker on the map.",
+  "home_stops": ["111111"],
+
+  "_return_stops": "Stops drawn with the return marker.",
+  "return_stops": ["222222"],
+
+  "_dest_hints": [
+    "Lowercase fragments; any stop whose name contains one gets flagged on the",
+    "map. Handy for a landmark you navigate by. Leave [] if you don't care."
+  ],
+  "dest_hints": [],
+
+  "_line_colors": "Bus arrow colour per line. Anything not listed uses a default.",
+  "line_colors": {"500T": "#c2410c"},
+
+  "_directions": [
+    "Direction filter, so buses going the wrong way are hidden. 'g' or 'd' match",
+    "the route leg; any other text is matched against the destination name. Omit a",
+    "line entirely to show BOTH directions, which is what you want for a short",
+    "ring route where every bus is useful."
+  ],
+  "directions": {"500T": "d"},
+
+  "_app_name": "Shown in the browser tab and when added to a phone home screen.",
+  "app_name": "500T Tracker",
+  "app_short_name": "500T",
+
+  "_eta_speed_kmh": "Fallback speed for the rough estimate when nothing is learned yet.",
+  "eta_speed_kmh": 18.0
+}

@@ -1,0 +1,3 @@
+# Runtime dependencies. Install with:  pip install -r requirements.txt
+requests>=2.25      # HTTP to the İBB SOAP gateway (its WSDL is malformed, so no zeep)
+rich>=12.0          # coloured terminal output for the CLI subcommands

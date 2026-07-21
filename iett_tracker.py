@@ -754,40 +754,84 @@ def cmd_dump_methods():
 # Browsers can't call the İBB SOAP API directly (no CORS), so the script runs a
 # tiny local web server: it serves the map page and a /positions JSON endpoint
 # that proxies live İBB data. The page polls that endpoint and moves the markers.
-# Stops to flag specially on the live map (--map):
-MAP_HOME_STOPS = {"260112"}        # 522 · 51. ÜMRANİYE G (going → Mecidiyeköy)
-MAP_RETURN_STOPS = {"260111"}      # 522 · ÜMRANİYE D (coming home ← Mecidiyeköy)
-MAP_DEST_HINTS = ("viyaduk",)  # flag any stop whose name contains these
-                               # (Mecidiyeköy VİYADÜK kept; MEZARLIK left plain)
-# Per-line bus colours on the map (others fall back to a default).
-MAP_LINE_COLORS = {"522": "#0a7a52", "M7": "#e67300"}
-# "My way" per line — the direction filter the map uses (so buses going the
-# other way are hidden). 'g'/'d' match the route leg; text matches destination.
-#   522 → 'g' = the leg toward Mecidiyeköy (the one that passes 51. ÜMRANİYE)
-# Lines NOT listed here are never direction-filtered. M7 is omitted on purpose:
-# it's a short Nurtepe⇄Mecidiyeköy ring, so we always show both directions
-# (otherwise its Mecidiyeköy-bound buses would disappear from the map).
-MAP_DIRECTIONS = {"522": "g"}
-# Live ETA panel: buses approaching this stop, on these lines.
-MAP_ETA = {"stop": "260112", "lines": ["522"], "label": "51. ÜMRANİYE"}
+# ── YOUR ROUTE ────────────────────────────────────────────────────────────────
+# Everything below is read from `config.json` beside this file, if it exists.
+# Without one, the built-in defaults (the 522 this was written for) are used, so
+# the app runs out of the box. To make it YOUR line:
+#
+#   1. python iett_tracker.py --stops 500T     # list a line's stops + codes
+#      python iett_tracker.py --search kadikoy # or search stops by name
+#   2. cp config.example.json config.json      # then edit it
+#
+# See config.example.json for every field and what it does.
+_DEFAULT_CONFIG = {
+    "line": "522",
+    "focus": [
+        {"line": "522", "stop": "260112", "label": "→ Mecidiyeköy", "at": "board at Ümraniye"},
+        {"line": "522", "stop": "302361", "label": "→ Home", "at": "board at Mecidiyeköy"},
+    ],
+    "eta": {"stop": "260112", "lines": ["522"], "label": "51. ÜMRANİYE"},
+    "home_stops": ["260112"],
+    "return_stops": ["260111"],
+    "dest_hints": ["viyaduk"],
+    "line_colors": {"522": "#0a7a52", "M7": "#e67300"},
+    "directions": {"522": "g"},
+    "app_name": "İETT 522 Tracker",
+    "app_short_name": "522",
+    "eta_speed_kmh": 18.0,
+}
+CONFIG_PATH = _osmod.path.join(_osmod.path.dirname(_osmod.path.abspath(__file__)), "config.json")
+
+
+def _load_config() -> dict:
+    """Merge config.json over the built-in defaults. A broken or missing file is
+    never fatal: we warn and fall back, because a tracker that refuses to start
+    is worse than one running the sample route."""
+    cfg = dict(_DEFAULT_CONFIG)
+    try:
+        with open(CONFIG_PATH, encoding="utf-8") as fh:
+            user = json.load(fh)
+        if not isinstance(user, dict):
+            raise ValueError("config.json must contain a JSON object")
+        cfg.update({k: v for k, v in user.items() if not k.startswith("_")})
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError) as exc:
+        print("[config] ignoring %s: %s" % (CONFIG_PATH, exc))
+    return cfg
+
+
+CONFIG = _load_config()
 # Hero-card focus points (the "I'm walking to the stop" boarding points). Each is
 # a segmented-control option; the card shows that stop's next buses + timetable.
-MAP_FOCUS = [
-    {"line": "522", "stop": "260112", "label": "→ Mecidiyeköy", "at": "board at Ümraniye"},
-    {"line": "522", "stop": "302361", "label": "→ Home", "at": "board at Mecidiyeköy"},
-]
-ETA_SPEED_KMH = 18.0  # rough city-bus average, only for the "~min" estimate
+MAP_FOCUS = CONFIG["focus"]
+# Live ETA panel: buses approaching this stop, on these lines.
+MAP_ETA = CONFIG["eta"]
+# Stops to flag specially on the live map (--map):
+MAP_HOME_STOPS = set(CONFIG["home_stops"])
+MAP_RETURN_STOPS = set(CONFIG["return_stops"])
+MAP_DEST_HINTS = tuple(CONFIG["dest_hints"])   # flag stops whose name contains these
+# Per-line bus colours on the map (others fall back to a default).
+MAP_LINE_COLORS = CONFIG["line_colors"]
+# "My way" per line — the direction filter the map uses (so buses going the other
+# way are hidden). 'g'/'d' match the route leg; text matches destination. Lines
+# NOT listed here are never direction-filtered, which is what you want for a short
+# ring route where both directions are useful.
+MAP_DIRECTIONS = CONFIG["directions"]
+DEFAULT_LINE = str(CONFIG["line"]).upper()
+ETA_SPEED_KMH = float(CONFIG["eta_speed_kmh"])  # city-bus average, for the "~min" estimate
 # Stops we score prediction accuracy for (the boarding stops we predict ETAs to).
 ACCURACY_STOPS = {f["stop"] for f in MAP_FOCUS}
 
-PWA_MANIFEST = """{
-  "name": "İETT 522 Tracker", "short_name": "522", "start_url": "/",
-  "display": "standalone", "background_color": "#0e1014", "theme_color": "#0e1014",
-  "icons": [
-    {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
-    {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"},
-    {"src": "/icon.svg", "sizes": "any", "type": "image/svg+xml"}]
-}"""
+PWA_MANIFEST = json.dumps({
+    "name": CONFIG["app_name"], "short_name": CONFIG["app_short_name"], "start_url": "/",
+    "display": "standalone", "background_color": "#0e1014", "theme_color": "#0e1014",
+    "icons": [
+        {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+        {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png",
+         "purpose": "any maskable"},
+        {"src": "/icon.svg", "sizes": "any", "type": "image/svg+xml"}],
+}, ensure_ascii=False)
 
 PWA_ICON = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
 <rect width="512" height="512" rx="104" fill="#0e1014"/>
