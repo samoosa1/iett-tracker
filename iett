@@ -1,0 +1,4 @@
+#!/bin/bash
+# Convenience launcher for the İETT tracker (uses this folder's venv).
+DIR="$(cd "$(dirname "$0")" && pwd)"
+exec "$DIR/.venv/bin/python" "$DIR/iett_tracker.py" "$@"

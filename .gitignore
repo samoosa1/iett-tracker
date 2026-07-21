@@ -1,0 +1,34 @@
+# --- secrets -----------------------------------------------------------------
+# Generated login password. NEVER commit this.
+.auth_secret
+.env
+*.env
+!.env.example
+
+# --- learned data & runtime state ---------------------------------------------
+# The SQLite DB is derived data (rebuilt by running the collector) and it records
+# arrival times at the specific stops you track, so it is personal as well as large.
+*.db
+*.db-wal
+*.db-shm
+backups/
+logs/
+*.log
+
+# Raw collector dumps (all-fleet snapshots, per-line samples) — big and regenerable
+fleet_raw/
+*.jsonl
+
+# --- python -------------------------------------------------------------------
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# --- os / editor --------------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
