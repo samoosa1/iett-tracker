@@ -247,7 +247,8 @@ def _resolve_auth_pass() -> str:
     try:
         with open(_SECRET_PATH, "w", encoding="utf-8") as fh:
             fh.write(pw + "\n")
-        print("[auth] generated a login password, saved to %s" % _SECRET_PATH)
+        print("[auth] your login password is:  %s" % pw)
+        print("[auth] saved to %s (set IETT_PASS to pick your own)" % _SECRET_PATH)
     except OSError:
         print("[auth] WARNING: could not write %s — password will change on restart"
               % _SECRET_PATH)
