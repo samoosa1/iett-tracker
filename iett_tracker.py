@@ -181,6 +181,39 @@ BIAS_OFFSETS = {"weekday-daytime": 0.9, "weekday-rush": 1.4, "weekend": 0.0}  # 
 ESTIMATE_BIAS = -1.7                          # min added to 'estimate' ETAs (show sooner)
 ORIGIN_WAIT_BIAS = -0.9                       # min added to 'origin-wait' ETAs (show sooner)
 HORIZON_BIAS_ANCHORS = [(6, 0.0), (8, 1.9), (10, 2.6), (13, 3.3), (16, 3.7)]  # (lead_min, +min)
+# Turkish public holidays behave like Sundays: transit runs the tatil timetable and
+# the roads clear, so an ordinary-weekday model would confidently mislead on exactly
+# the days you most need it. Holidays are mapped to the Sunday bucket everywhere the
+# app buckets by day (segment learning + lookup, the time-of-day accuracy bucket, and
+# the service-day timetable code). Fixed national days recur yearly (month, day); the
+# Bayram dates are lunar, so list them explicitly and extend this each year against
+# the official İETT calendar. On any NON-holiday, all of this is a no-op.
+_TR_FIXED_HOLIDAYS = {(1, 1), (4, 23), (5, 1), (5, 19), (7, 15), (8, 30), (10, 29)}
+_TR_BAYRAM_DAYS = {
+    "2026-03-20", "2026-03-21", "2026-03-22",                 # Ramazan Bayramı 2026
+    "2026-05-27", "2026-05-28", "2026-05-29", "2026-05-30",   # Kurban Bayramı 2026
+    "2027-03-10", "2027-03-11", "2027-03-12",                 # Ramazan Bayramı 2027 (approx)
+    "2027-05-16", "2027-05-17", "2027-05-18", "2027-05-19",   # Kurban Bayramı 2027 (approx)
+}
+
+
+def is_holiday(dt) -> bool:
+    """True if `dt` falls on a Turkish public holiday."""
+    return (dt.month, dt.day) in _TR_FIXED_HOLIDAYS \
+        or dt.strftime("%Y-%m-%d") in _TR_BAYRAM_DAYS
+
+
+def effective_dow(dt) -> int:
+    """Weekday index (Mon=0..Sun=6) with holidays mapped to Sunday (6), so holiday
+    hops pool with — and are predicted from — light-traffic Sunday data."""
+    return 6 if is_holiday(dt) else dt.weekday()
+
+
+def _daycode(dt) -> str:
+    """İETT service-day code: P = Sunday or holiday, C = Saturday, I = weekday."""
+    return "P" if effective_dow(dt) == 6 else "C" if dt.weekday() == 5 else "I"
+
+
 # İBB caps the live-position service at 100 req/HOUR (see LIVE_TTL note), so we
 # can't truly "sample fast" — the cache shares one upstream call per ~40 s. These
 # intervals govern the collector's local cadence; rush is a touch denser, off-peak
@@ -310,6 +343,11 @@ def soap_post(endpoint: str, method: str, **params) -> str:
     # a couple of quick retries smooth over the short blips.
     last = None
     for attempt in range(SOAP_RETRIES):
+        _t = time.time()                        # every real POST counts against the cap,
+        with _api_lock:                         # including the retries a flaky gateway forces
+            _api_calls.append(_t)
+            while _api_calls and _api_calls[0] < _t - 3600:
+                _api_calls.pop(0)
         try:
             resp = _session.post(endpoint, data=envelope.encode("utf-8"),
                                  headers=headers, timeout=30)
@@ -421,6 +459,9 @@ LIVE_FAIL_TTL = 20                # seconds to remember a failure (avoid retry s
 _live_cache: dict = {}            # line -> (epoch, ok, buses_or_exc)
 _live_lock = threading.Lock()
 _live_health: list = []           # (epoch, ok) of ACTUAL upstream fetches, last hour
+_api_calls: list = []             # epoch of every real İBB HTTP request, RETRIES INCLUDED
+_api_lock = threading.Lock()      # — the honest count for the 100/hr budget (a failed
+                                  #   retry still counts against the cap, so count it)
 
 
 def _record_live(ok: bool):
@@ -434,9 +475,17 @@ def _record_live(ok: bool):
 
 
 def live_health() -> dict:
+    now = time.time()
+    with _api_lock:
+        while _api_calls and _api_calls[0] < now - 3600:
+            _api_calls.pop(0)
+        real = len(_api_calls)
     n = len(_live_health)
     ok = sum(1 for _, o in _live_health if o)
-    return {"calls_1h": n, "ok_1h": ok, "fail_1h": n - ok,
+    # calls_1h is the TRUE budget figure (every HTTP request, retries and all).
+    # live_fetch_1h / ok / fail describe the logical live-feed outcomes, which is a
+    # different thing — they no longer have to sum to calls_1h, and shouldn't.
+    return {"calls_1h": real, "live_fetch_1h": n, "ok_1h": ok, "fail_1h": n - ok,
             "fail_pct_1h": round(100 * (n - ok) / n, 1) if n else None}
 
 
@@ -480,17 +529,42 @@ def api_stop_info(code: str) -> list:
 _plan_cache: dict = {}
 
 
+def _plan_disk_path(line: str) -> Path:
+    return APP_DIR / f"plan_{line}.json"
+
+
 def api_planned_times(line: str) -> list:
     """Scheduled departure times (timetable) from the line's origin. Rows:
     SYON (G/D leg), SGUNTIPI (I=weekday, C=Saturday, P=Sunday), DT ('06:00').
     On the healthy UlasimAnaVeri host, so usable even when live tracking is down.
-    Cached 12 h (the timetable rarely changes)."""
+
+    Cached in memory 12 h AND persisted to disk (plan_<line>.json). If the live
+    fetch fails, we serve the last saved copy — so the schedule fallback keeps
+    working across a restart or an İBB outage, which is exactly when it matters."""
     ent = _plan_cache.get(line)
     if ent and (time.time() - ent[0]) < 43200:
         return ent[1]
-    rows = soap_json(EP_PLAN, "GetPlanlananSeferSaati_json", HatKodu=line)
-    _plan_cache[line] = (time.time(), rows)
-    return rows
+    disk = _plan_disk_path(line)
+    try:
+        rows = soap_json(EP_PLAN, "GetPlanlananSeferSaati_json", HatKodu=line)
+        if rows:
+            _plan_cache[line] = (time.time(), rows)
+            try:
+                disk.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+            except OSError:
+                pass
+            return rows
+    except (Exception, SystemExit):
+        pass   # live timetable unreachable — fall through to the last good copy
+    try:
+        rows = json.loads(disk.read_text(encoding="utf-8"))
+        if rows:
+            _plan_cache[line] = (time.time(), rows)   # don't re-hit İBB on every call
+            log.info("timetable for %s served from disk cache (İBB unreachable)", line)
+            return rows
+    except (OSError, ValueError):
+        pass
+    return []
 
 
 def api_line_stops(line: str) -> list:
@@ -1902,7 +1976,7 @@ def _match_scheduled_dep(line, leg, obs_epoch):
     the next slot and record it as 'early', pulling the learned median toward zero.
     None (and counted as a drop) if >15 min late or >3 min early → an extra run."""
     d = datetime.fromtimestamp(obs_epoch)
-    day = "C" if d.weekday() == 5 else "P" if d.weekday() == 6 else "I"
+    day = _daycode(d)
     cands = _leg_slots(line, leg, day)
     if not cands:
         return None
@@ -2035,7 +2109,7 @@ def eta_payload(stop: str, lines: list) -> dict:
     try:
         rows = approaching(stop, lines)
         now = datetime.now()
-        now_hour, now_dow = now.hour, now.weekday()
+        now_hour, now_dow = now.hour, effective_dow(now)   # holiday → Sunday's data
         memo = {}   # share segment lookups across all approaching buses
         for r in rows:
             band = hist_eta_band(r["line"], r.get("leg", ""),
@@ -2086,8 +2160,7 @@ def eta_payload(stop: str, lines: list) -> dict:
 
 
 def _today_daycode() -> str:
-    wd = datetime.now().weekday()           # İETT: I=weekday, C=Saturday, P=Sunday
-    return "C" if wd == 5 else "P" if wd == 6 else "I"
+    return _daycode(datetime.now())         # I=weekday, C=Saturday, P=Sunday/holiday
 
 
 def scheduled_arrivals(line: str, home_code: str, n: int = 6) -> dict:
@@ -2119,7 +2192,7 @@ def scheduled_arrivals(line: str, home_code: str, n: int = 6) -> dict:
                   + timedelta(days=day_off)
             if hh not in travel_by_hour:
                 secs, _ = hist_eta_seconds(line, leg, 1, home_sira, hh,
-                                           dow=now.weekday())
+                                           dow=effective_dow(now))
                 travel_by_hour[hh] = secs
             secs = travel_by_hour[hh]
             if secs is None:
@@ -2263,7 +2336,7 @@ def record_hops(line: str) -> int:
         for k in range(p_sira, sira):
             fc, tc = legmap["by_sira"].get(k), legmap["by_sira"].get(k + 1)
             if fc and tc:
-                rows.append((line, leg, fc, tc, per_hop, when.weekday(), when.hour,
+                rows.append((line, leg, fc, tc, per_hop, effective_dow(when), when.hour,
                              when.isoformat(timespec="seconds")))
         # did this bus just cross one of the stops we predict for? log the
         # (interpolated) moment it did, to score past predictions against.
@@ -2283,7 +2356,7 @@ def record_hops(line: str) -> int:
             if sched is not None:
                 w = datetime.fromtimestamp(obs_dep)
                 dep_rows.append((line, leg, kapino, sched, obs_dep,
-                                 w.weekday(), w.hour))
+                                 effective_dow(w), w.hour))
     if rows or arr_rows or dep_rows:
         with _db_lock:
             if rows:
@@ -2747,7 +2820,7 @@ def _time_bucket(epoch) -> str:
     (within RUSH_WINDOWS), or weekday-daytime. The optimism lean differs across
     these, so they're scored separately (and a future correction reads per-bucket)."""
     dt = datetime.fromtimestamp(epoch)
-    if dt.weekday() >= 5:
+    if effective_dow(dt) >= 5:          # Sat/Sun, or a holiday (mapped to Sunday)
         return "weekend"
     return "weekday-rush" if any(a <= dt.hour < b for a, b in RUSH_WINDOWS) \
         else "weekday-daytime"

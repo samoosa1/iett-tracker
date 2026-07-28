@@ -35,3 +35,6 @@ Thumbs.db
 
 # Your personal route config (copy from config.example.json)
 config.json
+
+# timetable disk cache (regenerates from İBB on first run)
+plan_*.json
