@@ -2826,13 +2826,22 @@ def _time_bucket(epoch) -> str:
         else "weekday-daytime"
 
 
+ACC_LEAD_TARGET = 480.0   # 8 min: the representative "should I leave now" glance
+
+
 def accuracy_stats(stop=None, days=30) -> dict:
     """Score logged predictions against actual arrivals (matched by kapino).
     error = predicted_arrival − actual_arrival, in minutes: a positive bias means
     buses tend to arrive *earlier* than predicted, negative means we run optimistic
     (bus arrives later than shown). 'near10' restricts to predictions made within
     10 min of arrival — the lead time that actually matters at the stop. 'by_bucket'
-    splits that by time-of-week so the lean can be corrected per context later."""
+    splits that by time-of-week so the lean can be corrected per context later.
+
+    Each real bus contributes ONE data point (the prediction nearest an 8-min lead),
+    NOT one per logged prediction. A bus crawling a congested approach logs a burst
+    of predictions every ~40 s, so counting them all over-samples slow buses and
+    reads pessimistic — measured ~2 min of inflation on the Mecidiyeköy approach
+    (28 Jul 2026). De-duping per bus is a metric fix; the model is unchanged."""
     since = time.time() - days * 86400
     with _db_lock:
         cur = db()
@@ -2851,19 +2860,25 @@ def accuracy_stats(stop=None, days=30) -> dict:
     by_src: dict = {}
     by_bucket: dict = {}
     for line, kap, st, ts in arrs:
-        for made, pa, src in pidx.get((kap, st), []):
-            if not (ts - 3600 < made < ts):
-                continue
-            e = (pa - ts) / 60.0
-            errs.append(e)
-            by_src.setdefault(src, []).append(e)
-            if (ts - made) / 60.0 <= 10:   # the lead time we'd actually correct
-                near.append(e)
-                by_bucket.setdefault(_time_bucket(ts), []).append(e)
+        # all this arrival's predictions (a bus visits a stop once per trip, so
+        # everything in the hour before belongs to THIS arrival), then keep the one
+        # whose lead is nearest the decision moment — one point per bus, not per log.
+        cands = [(made, pa, src) for made, pa, src in pidx.get((kap, st), [])
+                 if ts - 3600 < made < ts]
+        if not cands:
+            continue
+        made, pa, src = min(cands, key=lambda c: abs((ts - c[0]) - ACC_LEAD_TARGET))
+        e = (pa - ts) / 60.0
+        errs.append(e)
+        by_src.setdefault(src, []).append(e)
+        if (ts - made) / 60.0 <= 10:   # the lead time we'd actually correct
+            near.append(e)
+            by_bucket.setdefault(_time_bucket(ts), []).append(e)
     return {"overall": _summ(errs), "near10": _summ(near),
             "by_src": {k: _summ(v) for k, v in by_src.items()},
             "by_bucket": {k: _summ(v) for k, v in by_bucket.items()},
             "bucket_now": _time_bucket(time.time()),
+            "buses_scored": len(errs),
             "matched_arrivals": len(arrs), "predictions": len(preds)}
 
 

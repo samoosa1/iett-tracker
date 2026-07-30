@@ -172,8 +172,49 @@ def test_holidays():
     check("Sunday -> P", t._daycode(sun) == "P")
 
 
+# ── accuracy metric de-dups per bus (not per logged prediction) ─────────────
+def test_accuracy_dedup():
+    import sqlite3
+    import time as _time
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE arr(line TEXT,kapino TEXT,stop TEXT,ts REAL)")
+    conn.execute("CREATE TABLE pred(line TEXT,kapino TEXT,stop TEXT,"
+                 "pred_arr REAL,made REAL,eta_min REAL,src TEXT)")
+    now = _time.time()
+
+    # Bus A: ONE arrival, but a burst of 10 predictions logged every minute as it
+    # crawled in (leads 3..12 min), each predicting +3 min late.
+    arr_a = now - 200
+    for lead in range(3, 13):
+        conn.execute("INSERT INTO pred VALUES('522','BUSA','S',?,?,?,'history')",
+                     (arr_a + 180, arr_a - lead * 60, lead))
+    conn.execute("INSERT INTO arr VALUES('522','BUSA','S',?)", (arr_a,))
+
+    # Bus B: a single accurate prediction (+1 min) at an 8-min lead.
+    arr_b = now - 4000
+    conn.execute("INSERT INTO pred VALUES('522','BUSB','S',?,?,8,'history')",
+                 (arr_b + 60, arr_b - 8 * 60))
+    conn.execute("INSERT INTO arr VALUES('522','BUSB','S',?)", (arr_b,))
+    conn.commit()
+
+    orig = t.db
+    t.db = lambda: conn
+    try:
+        res = t.accuracy_stats(days=30)
+    finally:
+        t.db = orig
+
+    # 11 raw predictions across 2 buses -> scored as 2, not 11
+    check("dedup: 2 buses scored not 11", res["buses_scored"] == 2)
+    check("dedup: raw prediction count preserved", res["predictions"] == 11)
+    check("dedup: near10 counts each bus once", res["near10"]["n"] == 2)
+    # bias = mean of the two representatives (+3, +1) = +2, NOT the burst-weighted 2.8
+    check("dedup: burst does not dominate bias", abs(res["near10"]["bias"] - 2.0) < 0.11)
+
+
 if __name__ == "__main__":
-    for fn in (test_horizon_bias, test_bias_stack, test_kalman, test_holidays):
+    for fn in (test_horizon_bias, test_bias_stack, test_kalman, test_holidays,
+               test_accuracy_dedup):
         fn()
     print(f"\n{_passed} passed, {_failed} failed")
     sys.exit(1 if _failed else 0)
