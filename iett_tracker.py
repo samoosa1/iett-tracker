@@ -177,10 +177,10 @@ BAND_CORR_INFLATE = 1.4                        # widen the quadrature ETA band a
 # ~25 min origin-wait error is dominated by departure-slot uncertainty (+11 min) where
 # this shift is noise, and it errs toward "arrives later than shown", the safe side.
 BIAS_CORRECT = True
-BIAS_OFFSETS = {"weekday-daytime": 0.9, "weekday-rush": 1.4, "weekend": 0.0}  # base min to add
+BIAS_OFFSETS = {"weekday-daytime": 0.3, "weekday-rush": 0.8, "weekend": 0.6}  # base min to add
 ESTIMATE_BIAS = -1.7                          # min added to 'estimate' ETAs (show sooner)
-ORIGIN_WAIT_BIAS = -0.9                       # min added to 'origin-wait' ETAs (show sooner)
-HORIZON_BIAS_ANCHORS = [(6, 0.0), (8, 1.9), (10, 2.6), (13, 3.3), (16, 3.7)]  # (lead_min, +min)
+ORIGIN_WAIT_BIAS = -0.5                       # min added to 'origin-wait' ETAs (show sooner)
+HORIZON_BIAS_ANCHORS = [(6, 0.0), (8, 5.0), (10, 5.5), (13, 6.0), (16, 6.3), (20, 6.6)]  # (lead,+min)
 # Turkish public holidays behave like Sundays: transit runs the tatil timetable and
 # the roads clear, so an ordinary-weekday model would confidently mislead on exactly
 # the days you most need it. Holidays are mapped to the Sunday bucket everywhere the

@@ -72,8 +72,9 @@ def test_horizon_bias():
     # monotonic non-decreasing across the ramp
     vals = [t._horizon_bias(x) for x in range(0, 40)]
     check("horizon monotonic", all(b >= a - 1e-9 for a, b in zip(vals, vals[1:])))
-    # linear interpolation between two anchors (7 is midway 6->8)
-    check("horizon interpolates", approx(t._horizon_bias(7), (0.0 + 1.9) / 2))
+    # linear interpolation midway between the first two anchors
+    (x0, y0), (x1, y1) = t.HORIZON_BIAS_ANCHORS[0], t.HORIZON_BIAS_ANCHORS[1]
+    check("horizon interpolates", approx(t._horizon_bias((x0 + x1) / 2), (y0 + y1) / 2))
     check("horizon None-safe", t._horizon_bias(None) == 0.0)
 
 
