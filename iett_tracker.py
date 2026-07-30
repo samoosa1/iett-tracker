@@ -180,7 +180,8 @@ BIAS_CORRECT = True
 BIAS_OFFSETS = {"weekday-daytime": 0.3, "weekday-rush": 0.8, "weekend": 0.6}  # base min to add
 ESTIMATE_BIAS = -1.7                          # min added to 'estimate' ETAs (show sooner)
 ORIGIN_WAIT_BIAS = -0.5                       # min added to 'origin-wait' ETAs (show sooner)
-HORIZON_BIAS_ANCHORS = [(6, 0.0), (8, 5.0), (10, 5.5), (13, 6.0), (16, 6.3), (20, 6.6)]  # (lead,+min)
+HORIZON_BIAS_ANCHORS = [(2, -0.7), (4, -0.4), (6, 0.0), (8, 5.0), (10, 5.5), (13, 6.0),
+                        (16, 6.3), (20, 6.6)]  # (lead_min, minutes to add; negative close in)
 # Turkish public holidays behave like Sundays: transit runs the tatil timetable and
 # the roads clear, so an ordinary-weekday model would confidently mislead on exactly
 # the days you most need it. Holidays are mapped to the Sunday bucket everywhere the
@@ -1837,14 +1838,15 @@ def _project_eta(rows, age):
 
 
 def _horizon_bias(eta_min) -> float:
-    """Extra minutes to add to a learned ETA for its lead time: segment-median sums
-    are ~unbiased close in, then compound with distance. Piecewise-linear through
-    HORIZON_BIAS_ANCHORS; held flat at the last anchor beyond 16 min."""
+    """Minutes to add to a learned ETA for its lead time: mildly negative close in
+    (median-sum slightly over-estimates), rising to strongly positive far out (errors
+    compound). Piecewise-linear through HORIZON_BIAS_ANCHORS; held flat at the first
+    anchor below its lead and at the last anchor beyond its lead."""
     if not BIAS_CORRECT or eta_min is None:
         return 0.0
     a = HORIZON_BIAS_ANCHORS
     if eta_min <= a[0][0]:
-        return 0.0
+        return a[0][1]
     if eta_min >= a[-1][0]:
         return a[-1][1]
     for (x0, y0), (x1, y1) in zip(a, a[1:]):

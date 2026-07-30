@@ -65,10 +65,15 @@ def test_horizon_bias():
     # anchor points reproduce exactly
     for lead, want in t.HORIZON_BIAS_ANCHORS:
         check(f"horizon anchor {lead}", approx(t._horizon_bias(lead), want))
-    # zero at/under the first anchor; flat cap past the last
-    check("horizon <=6 is 0", t._horizon_bias(3) == 0.0 and t._horizon_bias(6) == 0.0)
+    # flat cap past the last anchor, flat-held below the first
     last_x, last_y = t.HORIZON_BIAS_ANCHORS[-1]
+    first_x, first_y = t.HORIZON_BIAS_ANCHORS[0]
     check("horizon capped past last anchor", approx(t._horizon_bias(99), last_y))
+    check("horizon held below first anchor", approx(t._horizon_bias(0), first_y))
+    # close-in leans NEGATIVE (subtracts time) so the bus can't beat the number;
+    # it crosses zero and turns positive further out
+    check("horizon negative close in", t._horizon_bias(3) < 0)
+    check("horizon positive far out", t._horizon_bias(12) > 0)
     # monotonic non-decreasing across the ramp
     vals = [t._horizon_bias(x) for x in range(0, 40)]
     check("horizon monotonic", all(b >= a - 1e-9 for a, b in zip(vals, vals[1:])))
