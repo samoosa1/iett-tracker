@@ -1424,12 +1424,23 @@ async function fetchHero(f){
     fetch('/schedule?line='+f.line+'&stop='+f.stop+'&_='+Date.now()).then(r=>r.json()).catch(()=>({rows:[]}))
   ]);
 }
+let heroFails=0;   // consecutive /eta refresh failures for the active focus
 async function updateHero(){
   const f=FOCUS[focusIdx], key=focusIdx;
-  if(heroCache[key]) renderHero(heroCache[key].eta, heroCache[key].sch);  // instant: last value
-  setInd('working');   // bouncing dots while the fresh fetch is in flight
+  const have=!!heroCache[key];
+  if(have) renderHero(heroCache[key].eta, heroCache[key].sch);  // instant: keep last value + its live/stale/down dot
+  else setInd('working');   // 3 bouncing dots ONLY on a genuine cold start (nothing known yet)
   let eta, sch;
-  try{ [eta,sch]=await fetchHero(f); }catch(e){ return; }  // keep cached value on a hiccup
+  try{ [eta,sch]=await fetchHero(f); }
+  catch(e){                 // refresh failed — show the TRUE state, never sit on "loading"
+    heroFails++;
+    if(key===focusIdx){
+      if(have && heroFails<2){ setInd('stale'); document.getElementById('status').textContent='reconnecting… · showing last update'; }
+      else { setInd('down'); document.getElementById('status').textContent='offline · can’t reach tracker'; }
+    }
+    return;                 // keep the cached numbers on screen
+  }
+  heroFails=0;
   heroCache[key]={eta,sch}; saveCache();
   if(key===focusIdx) renderHero(eta,sch);   // only paint if still the active side
 }
