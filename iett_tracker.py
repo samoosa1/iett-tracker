@@ -785,25 +785,83 @@ def approaching(stop_code: str, lines: list) -> list:
             near = idx.get((leg, str(b.get("yakinDurakKodu"))))
             if not near:
                 continue
-            stops_away = targets[leg][0] - near[0]
-            if stops_away < 0:
-                continue  # already passed the stop
+            near_sira, seg_frac = near[0], 0.0
             dist = None
             tx, ty = targets[leg][2], targets[leg][3]
             if b.get("enlem") and b.get("boylam") and tx and ty:
                 try:  # XKOORDINATI=lon, YKOORDINATI=lat in İETT data
-                    dist = haversine_km(b["enlem"], b["boylam"], ty, tx)
+                    lat, lon = float(b["enlem"]), float(b["boylam"])
+                    dist = haversine_km(lat, lon, ty, tx)
+                    # sub-stop position: which segment the bus is actually on, and
+                    # how far along it — 'nearest stop' alone is off by up to one
+                    # whole segment either way.
+                    pos = _segment_position(line, leg, lat, lon, near[0])
+                    if pos:
+                        near_sira, seg_frac = pos
                 except (TypeError, ValueError):
                     dist = None
+            stops_away = targets[leg][0] - near_sira
+            if stops_away < 0:
+                continue  # already passed the stop
             out.append({"line": line, "kapino": b.get("kapino", ""),
                         "yon": b.get("yon", ""), "stops_away": stops_away,
                         "near_name": near[1], "dist_km": dist,
                         "seen": (b.get("son_konum_zamani") or "")[-8:],
                         "stop_name": targets[leg][1], "leg": leg,
-                        "near_sira": near[0], "target_sira": targets[leg][0]})
+                        "near_sira": near_sira, "target_sira": targets[leg][0],
+                        "seg_frac": round(seg_frac, 2)})
     out.sort(key=lambda x: (x["stops_away"],
                             x["dist_km"] if x["dist_km"] is not None else 99))
     return out
+
+
+_stop_s_cache: dict = {}
+
+
+def _stop_s_index(line: str, leg: str) -> dict:
+    """{stop_code: metres along the leg polyline}, each stop map-matched once onto
+    the OSRM road geometry. Cached 1 h. Empty when there is no road geometry."""
+    ent = _stop_s_cache.get((line, leg))
+    if ent and (time.time() - ent[0]) < 3600:
+        return ent[1]
+    out = {}
+    for code, (lat, lon) in stop_coords(line).items():
+        snap = _snap_to_route(line, leg, lat, lon)
+        if snap and snap[4] <= MAX_SNAP_OFF_M:
+            out[code] = snap[2]
+    _stop_s_cache[(line, leg)] = (time.time(), out)
+    return out
+
+
+def _locate_segment(s_bus, near_sira, by_sira, s_idx):
+    """Pure part of the sub-stop position: given the bus's metres along the route
+    and the stops' metres, return (segment_start_sira, fraction_done) for the
+    segment the bus is on. Only segments adjacent to İETT's own 'nearest stop' are
+    considered, so a route that doubles back on itself cannot snap the bus onto the
+    wrong pass. None when nothing fits (caller keeps the plain nearest-stop ETA)."""
+    for k in (near_sira - 1, near_sira, near_sira + 1):
+        a, b = by_sira.get(k), by_sira.get(k + 1)
+        sa, sb = s_idx.get(a), s_idx.get(b)
+        if sa is None or sb is None or sb <= sa:
+            continue
+        if sa <= s_bus < sb:
+            return k, (s_bus - sa) / (sb - sa)
+    return None
+
+
+def _segment_position(line, leg, lat, lon, near_sira):
+    """(segment_start_sira, fraction_done) for a live GPS fix, or None."""
+    try:
+        snap = _snap_to_route(line, leg, lat, lon)
+        if not snap or snap[4] > MAX_SNAP_OFF_M:
+            return None
+        legmap = route_legs(line).get(leg)
+        if not legmap:
+            return None
+        return _locate_segment(snap[2], near_sira, legmap["by_sira"],
+                               _stop_s_index(line, leg))
+    except (Exception, SystemExit):
+        return None   # geometry is an optimisation, never a failure mode
 
 
 def approaching_table(stop_code: str, lines: list) -> Table:
@@ -1815,10 +1873,12 @@ def log_predictions(stop, rows):
         if now - _pred_last.get(key, 0) < PRED_LOG_GAP:
             continue
         _pred_last[key] = now
-        batch.append((r.get("line"), kap, str(stop), now + em * 60, now, em, src))
+        raw = r.get("raw_min", em)   # pre-adaptive ETA (== em where nothing adapted)
+        batch.append((r.get("line"), kap, str(stop), now + em * 60, now, em, src,
+                      now + raw * 60))
     if batch:
         with _db_lock:
-            db().executemany("INSERT INTO pred VALUES (?,?,?,?,?,?,?)", batch)
+            db().executemany("INSERT INTO pred VALUES (?,?,?,?,?,?,?,?)", batch)
             db().commit()
 
 
@@ -1866,12 +1926,16 @@ def _horizon_bias(eta_min) -> float:
     return 0.0
 
 
-def _apply_bias_correction(rows) -> float:
+def _apply_bias_correction(rows, stop=None) -> float:
     """Land the shown ETA on the actual arrival. 'history'/'schedule' rows get the
     time-of-day floor plus the horizon ramp (grows with lead time); the 'estimate'
     fallback and 'origin-wait' each get their own measured constant, both pulling the
     other way (they ran pessimistic). Outage 'projected' rows are left alone. Returns
-    the tuning applied to the soonest learned bus, for the status line."""
+    the tuning applied to the soonest learned bus, for the status line.
+
+    When `stop` is an accuracy stop, learned-route rows then get the two ADAPTIVE
+    corrections (see _adaptive_state); the pre-adaptive value is kept in `raw_min`
+    so log_predictions can store it for the next round of learning."""
     if not BIAS_CORRECT:
         return 0.0
     off = BIAS_OFFSETS.get(_time_bucket(time.time()), 0.0)
@@ -1897,7 +1961,121 @@ def _apply_bias_correction(rows) -> float:
             r["eta_lo"] = max(0, round(r["eta_lo"] + adj))
         if r.get("eta_hi") is not None:
             r["eta_hi"] = max(0, round(r["eta_hi"] + adj))
+    if stop is not None and str(stop) in ACCURACY_STOPS:
+        shown += _apply_adaptive(rows, str(stop))
     return round(shown, 1)
+
+
+# ── Adaptive corrections (added 4 Sep 2026) ──────────────────────────────────
+# Backtested causally on 1,145 Ümraniye arrivals (Aug 2026): MAE 3.3 → 2.0 min,
+# p90 6.5 → 4.0, held in every week and on a clean second-half holdout.
+#  1. Hour-of-day bias: trailing 14-day mean residual for this hour ±1 (the static
+#     bucket floor above cannot see the +6 min dawn / −2.7 min afternoon swing).
+#  2. Last-bus feedback: consecutive buses share their error (lag-1 r = +0.71 at
+#     Ümraniye, +0.05 at the Mecidiyeköy terminus). Feed back FEEDBACK_K × the mean
+#     hour-corrected residual of the last FEEDBACK_N buses that arrived in the
+#     window. GATED per stop on the measured correlation, so it stays off where
+#     it would hurt (weight 0.6 made the terminus side worse in the backtest).
+# Both learn from `raw_arr` (pre-adaptive) residuals, never from the shown value.
+ADAPT_CORRECT = True
+ADAPT_HOUR_DAYS = 14          # trailing window for the hour-of-day bias
+ADAPT_HOUR_MIN_N = 10         # buses needed in hour±1 before the bias is trusted
+FEEDBACK_K = 0.6              # weight on the last buses' residual (0.5–0.9 all ≈ equal)
+FEEDBACK_N = 2                # how many recently-arrived buses to average
+FEEDBACK_WINDOW = 45 * 60     # a residual older than this says nothing about the road now
+FEEDBACK_MIN_R = 0.3          # gate: lag-1 residual correlation needed to enable feedback
+FEEDBACK_MIN_N = 50           # …measured over at least this many consecutive pairs
+_adapt_cache: dict = {}       # stop -> (epoch, state)
+
+
+def _bus_residuals(stop, since) -> list:
+    """One (arrival_ts, error_min) per bus at `stop` since `since`, error = raw
+    prediction nearest the 8-min lead − actual arrival (same de-dup as
+    accuracy_stats, but on the PRE-adaptive raw_arr). Sorted by arrival."""
+    with _db_lock:
+        cur = db()
+        arrs = cur.execute("SELECT kapino,ts FROM arr WHERE stop=? AND ts>? ORDER BY ts",
+                           (stop, since)).fetchall()
+        preds = cur.execute("SELECT kapino,made,COALESCE(raw_arr,pred_arr) FROM pred "
+                            "WHERE stop=? AND made>?", (stop, since - 3600)).fetchall()
+    pidx: dict = {}
+    for kap, made, pa in preds:
+        pidx.setdefault(kap, []).append((made, pa))
+    out = []
+    for kap, ts in arrs:
+        cands = [(made, pa) for made, pa in pidx.get(kap, []) if ts - 3600 < made < ts]
+        if cands:
+            made, pa = min(cands, key=lambda c: abs((ts - c[0]) - ACC_LEAD_TARGET))
+            out.append((ts, (pa - ts) / 60.0))
+    return out
+
+
+def _adaptive_state(stop) -> dict:
+    """{'hour': {h: mean_err}, 'feedback': bool, 'recent': [(ts, resid)]} for a stop,
+    cached 60 s (the clients poll /eta every ~40 s)."""
+    ent = _adapt_cache.get(stop)
+    now = time.time()
+    if ent and now - ent[0] < 60:
+        return ent[1]
+    pts = _bus_residuals(stop, now - 30 * 86400)
+    # 1. hour-of-day bias from the trailing ADAPT_HOUR_DAYS
+    by_h: dict = {}
+    for ts, e in pts:
+        if ts > now - ADAPT_HOUR_DAYS * 86400:
+            by_h.setdefault(datetime.fromtimestamp(ts).hour, []).append(e)
+    hour = {}
+    for h in range(24):
+        xs = by_h.get((h - 1) % 24, []) + by_h.get(h, []) + by_h.get((h + 1) % 24, [])
+        if len(xs) >= ADAPT_HOUR_MIN_N:
+            hour[h] = statistics.mean(xs)
+    # 2. gate the feedback on the measured lag-1 correlation (consecutive buses
+    #    within 30 min of each other, over the whole 30 days)
+    pairs = [(a[1], b[1]) for a, b in zip(pts, pts[1:]) if b[0] - a[0] < 1800]
+    feedback = False
+    if len(pairs) >= FEEDBACK_MIN_N:
+        try:
+            feedback = statistics.correlation([a for a, _ in pairs],
+                                              [b for _, b in pairs]) >= FEEDBACK_MIN_R
+        except statistics.StatisticsError:
+            feedback = False
+    recent = [(ts, e - hour.get(datetime.fromtimestamp(ts).hour, 0.0))
+              for ts, e in pts[-FEEDBACK_N:] if ts > now - FEEDBACK_WINDOW]
+    state = {"hour": hour, "feedback": feedback, "recent": recent,
+             "n": len(pts), "pairs": len(pairs)}
+    _adapt_cache[stop] = (now, state)
+    return state
+
+
+def _apply_adaptive(rows, stop) -> float:
+    """Shift learned-route rows by −(hour bias) − FEEDBACK_K·(recent residual).
+    Records `raw_min` (pre-adaptive) on every touched row. Returns the shift applied
+    to the soonest learned bus (for the status line)."""
+    if not ADAPT_CORRECT:
+        return 0.0
+    try:
+        st = _adaptive_state(stop)
+    except Exception:
+        return 0.0   # the DB must never break an ETA response
+    hb = st["hour"].get(datetime.now().hour, 0.0)
+    fb = FEEDBACK_K * statistics.mean(e for _, e in st["recent"]) \
+        if st["feedback"] and st["recent"] else 0.0
+    adj = -(hb + fb)
+    shown = 0.0
+    for r in rows:
+        if r.get("eta_src") not in ("history", "schedule") or r.get("eta_min") is None:
+            continue
+        r["raw_min"] = r["eta_min"]
+        if shown == 0.0:
+            shown = adj
+        if abs(adj) < 0.05:
+            continue
+        r["eta_min"] = max(0, round(r["eta_min"] + adj))
+        if r.get("eta_lo") is not None:
+            r["eta_lo"] = max(0, round(r["eta_lo"] + adj))
+        if r.get("eta_hi") is not None:
+            r["eta_hi"] = max(0, round(r["eta_hi"] + adj))
+        r["adapt_adj"] = round(adj, 1)
+    return shown
 
 
 def _flag_bunching(rows, gap_min=2):
@@ -2127,7 +2305,7 @@ def eta_payload(stop: str, lines: list) -> dict:
         for r in rows:
             band = hist_eta_band(r["line"], r.get("leg", ""),
                                  r.get("near_sira"), r.get("target_sira"),
-                                 now_hour, memo, now_dow)
+                                 now_hour, memo, now_dow, r.get("seg_frac", 0.0))
             if band is not None:
                 secs, lo, hi, src = band
                 r["eta_min"], r["eta_src"] = round(secs / 60), src
@@ -2150,7 +2328,7 @@ def eta_payload(stop: str, lines: list) -> dict:
         last_passed = lp[0][11:16] if lp else None
         if lines:
             _eta_cache[(stop, lines[0])] = (time.time(), rows, last_passed)
-        bias_adj = _apply_bias_correction(rows)   # correct, THEN log/show the corrected ETA
+        bias_adj = _apply_bias_correction(rows, stop)   # correct, THEN log/show the corrected ETA
         try:
             log_predictions(stop, rows)
         except Exception:
@@ -2242,9 +2420,13 @@ def db() -> sqlite3.Connection:
         _db.execute("PRAGMA synchronous=NORMAL")   # durable across app crashes
         _db.execute("""CREATE TABLE IF NOT EXISTS hops(
             line TEXT, leg TEXT, from_code TEXT, to_code TEXT,
-            seconds REAL, dow INTEGER, hour INTEGER, ts TEXT)""")
+            seconds REAL, dow INTEGER, hour INTEGER, ts TEXT, kapino TEXT)""")
         _db.execute("""CREATE INDEX IF NOT EXISTS idx_hop
             ON hops(line, leg, from_code, to_code)""")
+        # kapino added 4 Sep 2026 so a bus's OWN recent pace can be scored against
+        # the segment medians later (per-bus drift correction). Older DBs lack it.
+        if "kapino" not in [r[1] for r in _db.execute("PRAGMA table_info(hops)")]:
+            _db.execute("ALTER TABLE hops ADD COLUMN kapino TEXT")
         # baseline per-segment times that live data overrides once a segment has
         # enough real observations. hour = -1 is the all-day schedule baseline;
         # hour 0..23 are traffic-adjusted per-hour baselines.
@@ -2264,9 +2446,14 @@ def db() -> sqlite3.Connection:
         # close predictions land. made/pred_arr/ts are epoch seconds.
         _db.execute("""CREATE TABLE IF NOT EXISTS pred(
             line TEXT, kapino TEXT, stop TEXT, pred_arr REAL, made REAL,
-            eta_min INTEGER, src TEXT)""")
+            eta_min INTEGER, src TEXT, raw_arr REAL)""")
         _db.execute("""CREATE INDEX IF NOT EXISTS idx_pred
             ON pred(kapino, stop, made)""")
+        # raw_arr = the prediction BEFORE the adaptive corrections (hour bias +
+        # last-bus feedback). Those corrections learn from raw residuals; scoring
+        # them on the already-corrected pred_arr would make them chase their tail.
+        if "raw_arr" not in [r[1] for r in _db.execute("PRAGMA table_info(pred)")]:
+            _db.execute("ALTER TABLE pred ADD COLUMN raw_arr REAL")
         _db.execute("""CREATE TABLE IF NOT EXISTS arr(
             line TEXT, kapino TEXT, stop TEXT, ts REAL)""")
         _db.execute("""CREATE INDEX IF NOT EXISTS idx_arr
@@ -2350,7 +2537,7 @@ def record_hops(line: str) -> int:
             fc, tc = legmap["by_sira"].get(k), legmap["by_sira"].get(k + 1)
             if fc and tc:
                 rows.append((line, leg, fc, tc, per_hop, effective_dow(when), when.hour,
-                             when.isoformat(timespec="seconds")))
+                             when.isoformat(timespec="seconds"), kapino))
         # did this bus just cross one of the stops we predict for? log the
         # (interpolated) moment it did, to score past predictions against.
         for ts_code in ACCURACY_STOPS:
@@ -2373,7 +2560,7 @@ def record_hops(line: str) -> int:
     if rows or arr_rows or dep_rows:
         with _db_lock:
             if rows:
-                db().executemany("INSERT INTO hops VALUES (?,?,?,?,?,?,?,?)", rows)
+                db().executemany("INSERT INTO hops VALUES (?,?,?,?,?,?,?,?,?)", rows)
             if arr_rows:
                 db().executemany("INSERT INTO arr VALUES (?,?,?,?)", arr_rows)
             if dep_rows:
@@ -2764,10 +2951,12 @@ def _segment_band(cur, line, leg, fc, tc, hour=None, dow=None):
 
 
 def hist_eta_band(line: str, leg: str, near_sira, home_sira, hour=None, memo=None,
-                  dow=None):
+                  dow=None, frac_done=0.0):
     """Sum of per-segment times from the bus's current stop to the home stop, as
     (seconds, low, high, src). 'history' if any segment used live data, else
-    'schedule'. None if coverage is poor (<60%) — caller falls back to distance."""
+    'schedule'. None if coverage is poor (<60%) — caller falls back to distance.
+    `frac_done` (0..1) is how far along the FIRST segment the bus already is (from
+    its GPS map-matched onto the road); that share of the segment is not charged."""
     if not leg or near_sira is None or home_sira is None or home_sira <= near_sira:
         return None
     legmap = route_legs(line).get(leg)
@@ -2775,6 +2964,7 @@ def hist_eta_band(line: str, leg: str, near_sira, home_sira, hour=None, memo=Non
         return None
     total = hiqr_sq = 0.0
     covered = segments = live_used = 0
+    first_m = None
     with _db_lock:
         cur = db()
         for k in range(near_sira, home_sira):
@@ -2796,11 +2986,15 @@ def hist_eta_band(line: str, leg: str, near_sira, home_sira, hour=None, memo=Non
                 covered += 1
                 if src == "live":
                     live_used += 1
+                if k == near_sira:
+                    first_m = m
     if segments == 0 or covered / segments < 0.6:
         return None
     if covered < segments:        # scale up to cover the few unknown hops
         f = segments / covered
         total *= f; hiqr_sq *= f
+    if first_m is not None and 0.0 < frac_done <= 1.0:
+        total -= frac_done * first_m       # already-covered part of the current segment
     # Combine per-segment spreads in QUADRATURE, not by direct sum: stop-to-stop
     # delays partly cancel (one slow, one fast), so journey variance = sum of
     # segment variances, and the band ∝ sqrt of that — far tighter and honest.

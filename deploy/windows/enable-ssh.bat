@@ -2,7 +2,7 @@
 REM ====================================================================
 REM  Lets Claude (from the Mac, over Tailscale) run commands on this PC
 REM  so you don't have to type them by hand.
-REM  Installs Windows OpenSSH Server + trusts Claude's key. Run ONCE.
+REM  Installs Windows OpenSSH Server + trusts your public key. Run ONCE.
 REM  Just double-click and click "Yes" on the admin popup.
 REM ====================================================================
 title IETT tracker - enable SSH
@@ -22,7 +22,8 @@ powershell -NoProfile -Command "Add-WindowsCapability -Online -Name OpenSSH.Serv
 echo Setting it to start automatically...
 powershell -NoProfile -Command "Set-Service -Name sshd -StartupType Automatic; Start-Service sshd"
 
-echo Trusting Claude's key...
+echo Trusting your key...
+REM  Paste the PUBLIC key of the machine that will SSH in (contents of ~/.ssh/id_ed25519.pub).
 set "PUB=ssh-ed25519 AAAA...your-public-key... you@your-machine"
 set "AUTH=%ProgramData%\ssh\administrators_authorized_keys"
 >>"%AUTH%" echo %PUB%
@@ -30,7 +31,7 @@ icacls "%AUTH%" /inheritance:r /grant "Administrators:F" /grant "SYSTEM:F" >nul
 
 echo.
 echo ============================================================
-echo  Done. SSH is on and Claude's key is trusted.
+echo  Done. SSH is on and your key is trusted.
 echo  Tell Claude "ssh is ready" and it can drive this PC.
 echo ============================================================
 echo.

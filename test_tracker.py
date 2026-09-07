@@ -218,9 +218,98 @@ def test_accuracy_dedup():
     check("dedup: burst does not dominate bias", abs(res["near10"]["bias"] - 2.0) < 0.11)
 
 
+# ── adaptive corrections: hour bias + gated last-bus feedback ────────────────
+def test_adaptive():
+    import sqlite3
+    import time as _time
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE arr(line TEXT,kapino TEXT,stop TEXT,ts REAL)")
+    conn.execute("CREATE TABLE pred(line TEXT,kapino TEXT,stop TEXT,pred_arr REAL,"
+                 "made REAL,eta_min REAL,src TEXT,raw_arr REAL)")
+    now = _time.time()
+
+    def bus(stop, kap, ts, err_min):
+        # one arrival + one raw prediction at an 8-min lead, off by err_min
+        conn.execute("INSERT INTO arr VALUES('522',?,?,?)", (kap, stop, ts))
+        conn.execute("INSERT INTO pred VALUES('522',?,?,?,?,8,'history',?)",
+                     (kap, stop, ts + err_min * 60 + 999, ts - 480, ts + err_min * 60))
+
+    # Stop CORR: 80 buses, 12 min apart, error drifting slowly in blocks of 20
+    # (−3 → +3 → −3 → +3), so consecutive buses share their error (high lag-1
+    # correlation). The LAST block ran +3: raw prediction − actual = +3 means the bus
+    # arrived 3 min EARLIER than raw said (raw pessimistic) → correction must SUBTRACT.
+    for i in range(80):
+        err = 3.0 if (i // 20) % 2 == 1 else -3.0
+        bus("CORR", f"C{i}", now - (80 - i) * 720, err)
+    # Stop NOISE: 80 buses, alternating ±3 → lag-1 correlation ≈ −1 → feedback OFF
+    for i in range(80):
+        bus("NOISE", f"N{i}", now - (80 - i) * 720, 3.0 if i % 2 else -3.0)
+    conn.commit()
+
+    orig = t.db
+    t.db = lambda: conn
+    t._adapt_cache.clear()
+    try:
+        sc = t._adaptive_state("CORR")
+        check("adaptive: feedback enabled where errors correlate", sc["feedback"])
+        check("adaptive: recent residuals captured", len(sc["recent"]) == t.FEEDBACK_N)
+        sn = t._adaptive_state("NOISE")
+        check("adaptive: feedback gated OFF where errors don't correlate", not sn["feedback"])
+        check("adaptive: hour bias learned (some hour populated)", len(sc["hour"]) > 0)
+
+        # the correction moves the shown ETA the right way and keeps the raw value
+        rows = [{"eta_src": "history", "eta_min": 10, "eta_lo": 8, "eta_hi": 13},
+                {"eta_src": "origin-wait", "eta_min": 10},
+                {"eta_src": "estimate", "eta_min": 4}]
+        shift = t._apply_adaptive(rows, "CORR")
+        check("adaptive: learned row shifted down (raw ran pessimistic)", rows[0]["eta_min"] < 10)
+        check("adaptive: raw_min kept for logging", rows[0]["raw_min"] == 10)
+        check("adaptive: band follows the point", rows[0]["eta_hi"] < 13)
+        check("adaptive: origin-wait untouched", rows[1]["eta_min"] == 10 and "raw_min" not in rows[1])
+        check("adaptive: estimate untouched", rows[2]["eta_min"] == 4)
+        check("adaptive: reports the shift applied", shift < 0)
+
+        # master switch off = identity
+        t.ADAPT_CORRECT = False
+        try:
+            r = [{"eta_src": "history", "eta_min": 10}]
+            check("adaptive: switch off is identity", t._apply_adaptive(r, "CORR") == 0.0
+                  and r[0]["eta_min"] == 10)
+        finally:
+            t.ADAPT_CORRECT = True
+        # a non-accuracy stop through the public entry point: adaptive not applied
+        r = [{"eta_src": "history", "eta_min": 10, "eta_lo": 8, "eta_hi": 13}]
+        t._apply_bias_correction(r, "999999")
+        check("adaptive: skipped for a non-accuracy stop", "raw_min" not in r[0])
+    finally:
+        t.db = orig
+        t._adapt_cache.clear()
+
+
+# ── sub-stop position: which segment, how far along ─────────────────────────
+def test_locate_segment():
+    by_sira = {1: "A", 2: "B", 3: "C", 4: "D"}
+    s_idx = {"A": 0.0, "B": 1000.0, "C": 1600.0, "D": 2600.0}
+    # bus 250 m past B, İETT says nearest stop is B (sira 2): on segment 2→3, 42% done
+    k, f = t._locate_segment(1250.0, 2, by_sira, s_idx)
+    check("segment: start sira", k == 2)
+    check("segment: fraction", approx(f, 250 / 600, 1e-9))
+    # nearest stop reported AHEAD of the bus (C, sira 3) while it is still on 2→3:
+    # must resolve to the segment BEHIND the reported stop
+    k, f = t._locate_segment(1500.0, 3, by_sira, s_idx)
+    check("segment: nearest-ahead resolves to previous segment", k == 2 and f > 0.8)
+    # exactly at a stop → fraction 0 of the next segment
+    k, f = t._locate_segment(1600.0, 3, by_sira, s_idx)
+    check("segment: at stop = start of next", k == 3 and approx(f, 0.0))
+    # bus far from the reported stop's neighbourhood (route doubles back): None
+    check("segment: off-neighbourhood is None", t._locate_segment(2550.0, 1, by_sira, s_idx) is None)
+    # missing geometry for a stop → None, never a crash
+    check("segment: missing stop metres is None", t._locate_segment(500.0, 1, by_sira, {"A": 0.0}) is None)
+
+
 if __name__ == "__main__":
     for fn in (test_horizon_bias, test_bias_stack, test_kalman, test_holidays,
-               test_accuracy_dedup):
+               test_accuracy_dedup, test_adaptive, test_locate_segment):
         fn()
     print(f"\n{_passed} passed, {_failed} failed")
     sys.exit(1 if _failed else 0)
