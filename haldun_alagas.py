@@ -1,22 +1,45 @@
 #!/usr/bin/env python3
-"""Quick & shoddy: how far are the 14B and 14ES from the Haldun Alagaş stop?
-Reuses iett_tracker.py. Usage: python3 haldun_alagas.py"""
+"""Quick & shoddy: how far are buses from a stop?
+Usage: python3 haldun_alagas.py [LINE ...] [--stop "name words"]
+Default: lines 14B 14ES, stop 'Haldun Alagaş'. Prints debug info so we can see
+where it goes wrong."""
+import sys
 import iett_tracker as t
 
-LINES = ["14B", "14ES"]
+args = sys.argv[1:]
+words = ["haldun", "alagas"]
+if "--stop" in args:
+    i = args.index("--stop")
+    words = t.norm(args[i + 1]).split()
+    del args[i:i + 2]
+LINES = [a.upper() for a in args] or ["14B", "14ES"]
 
-stops = [s for s in t.all_stops() if "haldun" in t.norm(s.get("SDURAKADI", ""))
-         and "alagas" in t.norm(s.get("SDURAKADI", ""))]
-if not stops:
-    raise SystemExit("No stop matching 'Haldun Alagaş' found")
-
-for s in stops:                       # several stops may share the name (one per side)
-    code = str(s.get("SDURAKKODU"))
-    print(f"\n== {s.get('SDURAKADI')}  (code {code}) ==")
-    rows = t.approaching(code, LINES)
-    if not rows:
-        print("  no 14B/14ES buses approaching this stop (or line doesn't serve it)")
-    for r in rows:
-        d = f"{r['dist_km']:.2f} km" if r["dist_km"] is not None else "? km"
-        print(f"  {r['line']:5} bus {r['kapino']:8} {r['stops_away']} stops away, "
-              f"{d} straight-line, now near '{r['near_name']}' (seen {r['seen']})")
+for line in LINES:
+    print(f"\n===== Line {line} =====")
+    route = t.cached_route(line)
+    print(f"route rows: {len(route)}")
+    if route:
+        print("sample route row:", route[0])
+    hits = {}
+    for r in route:
+        name = t.norm(r.get("DURAKADI", ""))
+        if all(w in name for w in words):
+            hits[str(r.get("DURAKKODU"))] = (r.get("DURAKADI"), r.get("YON"), r.get("SIRANO"))
+    print("matching stops on this line:", hits or "NONE")
+    try:
+        buses = t.api_live_buses(line)
+    except (Exception, SystemExit) as e:
+        print("live fetch FAILED:", e)
+        continue
+    print(f"live buses: {len(buses)}")
+    for b in buses[:3]:
+        print("  sample bus:", b)
+    for code, (name, leg, sira) in hits.items():
+        rows = t.approaching(code, [line])
+        print(f"-- {name} (code {code}, leg {leg}, stop #{sira}) --")
+        if not rows:
+            print("  no buses approaching (all passed it / wrong direction)")
+        for r in rows:
+            d = f"{r['dist_km']:.2f} km" if r["dist_km"] is not None else "? km"
+            print(f"  bus {r['kapino']:8} {r['stops_away']} stops away, {d} straight-line, "
+                  f"near '{r['near_name']}' (seen {r['seen']})")
